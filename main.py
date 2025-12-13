@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -33,9 +34,14 @@ async def load_cogs() -> None:
 
 
 async def main() -> None:
+    load_dotenv()
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("DISCORD_TOKEN environment variable is not set")
     async with bot:
         await load_cogs()
-        await bot.start(os.getenv("DISCORD_TOKEN", ""))
+        await bot.start(token)
+        await bot.start(token)
 
 
 if __name__ == "__main__":
