@@ -84,8 +84,24 @@ class MarkovCog(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
+        if self.bot.user in message.mentions:
+            content = message.content
+            for mention in message.mentions:
+                content = content.replace(f"<@{mention.id}>", "")
+                content = content.replace(f"<@!{mention.id}>", "")
+
+            if not content.strip():
+                response = self.generate_message(message.guild.id)
+                if response:
+                    try:
+                        await message.channel.send(response)
+                    except Exception:
+                        pass
+                return
+
         self.add_message(message.guild.id, message.content)
 
+        # save occasionally
         if random.random() < 0.05:
             self.save_data()
 
