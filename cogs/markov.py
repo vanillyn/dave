@@ -37,6 +37,17 @@ class MarkovCog(commands.Cog):
         except Exception as e:
             print(f"failed to save markov data: {e}")
 
+    def is_allowed_channel(self, channel_id: int, guild_id: int) -> bool:
+        config_cog = self.bot.get_cog("Config")
+        if not config_cog:
+            return True
+
+        allowed_channels = config_cog.get_markov_channels(guild_id)
+        if not allowed_channels:
+            return True
+
+        return channel_id in allowed_channels
+
     def add_message(self, guild_id: int, text: str) -> None:
         if len(text) < 10 or text.startswith(("!", "/", "http")):
             return
@@ -84,6 +95,9 @@ class MarkovCog(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
+        if not self.is_allowed_channel(message.channel.id, message.guild.id):
+            return
+
         if self.bot.user in message.mentions:
             content = message.content
             for mention in message.mentions:
@@ -101,7 +115,6 @@ class MarkovCog(commands.Cog):
 
         self.add_message(message.guild.id, message.content)
 
-        # save occasionally
         if random.random() < 0.05:
             self.save_data()
 
@@ -113,15 +126,30 @@ class MarkovCog(commands.Cog):
             if random.random() > 0.2:
                 continue
 
-            channels = [
-                c
-                for c in guild.text_channels
-                if c.permissions_for(guild.me).send_messages
-            ]
-            if not channels:
+            config_cog = self.bot.get_cog("Config")
+            allowed_channels = []
+
+            if config_cog:
+                allowed_channel_ids = config_cog.get_markov_channels(guild.id)
+                if allowed_channel_ids:
+                    allowed_channels = [
+                        c
+                        for c in guild.text_channels
+                        if c.id in allowed_channel_ids
+                        and c.permissions_for(guild.me).send_messages
+                    ]
+
+            if not allowed_channels:
+                allowed_channels = [
+                    c
+                    for c in guild.text_channels
+                    if c.permissions_for(guild.me).send_messages
+                ]
+
+            if not allowed_channels:
                 continue
 
-            channel = random.choice(channels[:5])
+            channel = random.choice(allowed_channels[:5])
 
             message = self.generate_message(guild.id)
             if message:
