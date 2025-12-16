@@ -283,7 +283,7 @@ class ChatBot(commands.Cog):
     async def debug_info(self, ctx):
         active_convs = len(self.active_conversations)
 
-        info = f"""**Debug Info:**
+        info = f"""**debug Info:**
 active conversations: {active_convs}
 model: {self.model}
 ollama connectivity: {self.ollama_available}
