@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import ollama
 import asyncio
@@ -356,63 +357,94 @@ class ChatBot(commands.Cog):
                         except discord.HTTPException as e:
                             print(f"failed to send message: {e}")
 
-    @commands.command(name="botstatus", description="check ollama bot status")
-    @commands.is_owner()
-    async def check_status(self, ctx):
+    @app_commands.command(name="botstatus", description="check ollama bot status")
+    async def check_status(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.followup.send(
+                "you don't have permission to use this command", ephemeral=True
+            )
+            return
+
         await self.check_ollama_connection()
 
         if self.ollama_available:
             try:
-                models = await asyncio.to_thread(ollama.list)
-                model_list = [m["name"] for m in models.get("models", [])]
+                response = await asyncio.to_thread(ollama.list)
+                models = response.get("models", [])
+                model_list = [m.get("name", m.get("model", "unknown")) for m in models]
 
                 status_msg = "ollama online\n"
                 status_msg += f"model: **{self.model}**\n"
                 status_msg += f"web search: {'enabled' if self.web_search_enabled else 'disabled'}\n"
                 status_msg += f"available: {', '.join(model_list[:5])}"
 
-                await ctx.send(status_msg)
+                await interaction.followup.send(status_msg, ephemeral=True)
             except Exception as e:
-                await ctx.send(f"ollama available but error: {e}")
+                await interaction.followup.send(
+                    f"ollama available but error: {e}", ephemeral=True
+                )
         else:
-            await ctx.send("ollama offline")
+            await interaction.followup.send("ollama offline", ephemeral=True)
 
-    @commands.command(name="search", description="manually perform a web search")
-    @commands.is_owner()
-    async def manual_search(self, ctx, *, query: str):
-        if not self.web_search_enabled:
-            await ctx.send("web search not enabled (need OLLAMA_API_KEY)")
+    @app_commands.command(name="search", description="manually perform a web search")
+    async def manual_search(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=True)
+
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.followup.send(
+                "you don't have permission to use this command", ephemeral=True
+            )
             return
 
-        async with ctx.typing():
-            results = await self.web_search(query)
-            if results:
-                await ctx.send(results)
-            else:
-                await ctx.send("no results found")
+        if not self.web_search_enabled:
+            await interaction.followup.send(
+                "web search not enabled (need OLLAMA_API_KEY)", ephemeral=True
+            )
+            return
 
-    @commands.command(
+        results = await self.web_search(query)
+        if results:
+            await interaction.followup.send(results, ephemeral=True)
+        else:
+            await interaction.followup.send("no results found", ephemeral=True)
+
+    @app_commands.command(
         name="resetconvo", description="reset your current conversation with the bot"
     )
-    @commands.is_owner()
-    async def reset_conversation(self, ctx):
-        key = (ctx.channel.id, ctx.author.id)
+    async def reset_conversation(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.followup.send(
+                "you don't have permission to use this command", ephemeral=True
+            )
+            return
+
+        key = (interaction.channel.id, interaction.user.id)
 
         if key in self.active_conversations:
             del self.active_conversations[key]
-            await ctx.send("conversation reset")
+            await interaction.followup.send("conversation reset", ephemeral=True)
         else:
-            await ctx.send("no active conversation")
+            await interaction.followup.send("no active conversation", ephemeral=True)
 
-    @commands.command(
+    @app_commands.command(
         name="debugcontext", description="debug: show current conversation context"
     )
-    @commands.is_owner()
-    async def debug_context(self, ctx):
-        key = (ctx.channel.id, ctx.author.id)
+    async def debug_context(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.followup.send(
+                "you don't have permission to use this command", ephemeral=True
+            )
+            return
+
+        key = (interaction.channel.id, interaction.user.id)
 
         if key not in self.active_conversations:
-            await ctx.send("no active conversation")
+            await interaction.followup.send("no active conversation", ephemeral=True)
             return
 
         context = self.active_conversations[key]["messages"]
@@ -423,7 +455,7 @@ class ChatBot(commands.Cog):
         if len(context_str) > 1900:
             context_str = context_str[:1900] + "..."
 
-        await ctx.send(f"**context:**\n{context_str}")
+        await interaction.followup.send(f"**context:**\n{context_str}", ephemeral=True)
 
 
 async def setup(bot):
