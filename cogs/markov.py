@@ -48,14 +48,28 @@ class MarkovCog(commands.Cog):
 
         return channel_id in allowed_channels
 
-    def add_message(self, guild_id: int, text: str) -> None:
-        if len(text) < 10 or text.startswith(("!", "/", "http")):
-            return
+    def is_valid_message(self, text: str) -> bool:
+        if len(text) < 10:
+            return False
+
+        if text.startswith(("dave:", "/", "http://", "https://")):
+            return False
 
         words = text.split()
         if len(words) < 3:
+            return False
+
+        special_count = sum(1 for c in text if not c.isalnum() and not c.isspace())
+        if special_count > len(text) * 0.5:
+            return False
+
+        return True
+
+    def add_message(self, guild_id: int, text: str) -> None:
+        if not self.is_valid_message(text):
             return
 
+        words = text.split()
         chain = self.chains[guild_id]
 
         chain["__START__"].append(words[0])
@@ -65,7 +79,7 @@ class MarkovCog(commands.Cog):
 
         chain[words[-1]].append("__END__")
 
-    def generate_message(self, guild_id: int) -> Optional[str]:
+    def generate_message(self, guild_id: int, max_length: int = 50) -> Optional[str]:
         chain = self.chains.get(guild_id)
         if not chain or "__START__" not in chain:
             return None
@@ -73,7 +87,7 @@ class MarkovCog(commands.Cog):
         words = []
         current = random.choice(chain["__START__"])
 
-        for _ in range(50):
+        for _ in range(max_length):
             words.append(current)
 
             if current not in chain or not chain[current]:
@@ -118,9 +132,14 @@ class MarkovCog(commands.Cog):
         if random.random() < 0.05:
             self.save_data()
 
-    @tasks.loop(minutes=random.randint(15, 45))
+    @tasks.loop(minutes=1)
     async def random_message(self) -> None:
         await self.bot.wait_until_ready()
+
+        await discord.utils.sleep_until(
+            discord.utils.utcnow()
+            + discord.utils.timedelta(minutes=random.randint(15, 45))
+        )
 
         for guild in self.bot.guilds:
             if random.random() > 0.2:
@@ -148,7 +167,6 @@ class MarkovCog(commands.Cog):
 
             if not allowed_channels:
                 continue
-
             channel = random.choice(allowed_channels[:5])
 
             message = self.generate_message(guild.id)

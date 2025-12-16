@@ -8,7 +8,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="dave:", intents=intents)
 
 
 @bot.event
@@ -40,7 +40,6 @@ async def main() -> None:
         raise ValueError("DISCORD_TOKEN environment variable is not set")
     async with bot:
         await load_cogs()
-        await bot.start(token)
         await bot.start(token)
 
 

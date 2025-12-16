@@ -1,3 +1,4 @@
+import discord
 from discord.ext import commands
 import ollama
 import asyncio
@@ -5,6 +6,7 @@ from datetime import datetime, timedelta
 import random
 import os
 import re
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,32 +19,30 @@ class ChatBot(commands.Cog):
         self.active_conversations = {}
         self.activity_tracker = {}
 
-        self.model = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
+        self.model = os.getenv("OLLAMA_MODEL", "dolphin-mistral:latest")
         self.context_length = int(os.getenv("CONTEXT_LENGTH", "20"))
-        self.conversation_timeout = int(os.getenv("CONVERSATION_TIMEOUT", "600"))
-        self.activity_threshold = int(os.getenv("ACTIVITY_THRESHOLD", "8"))
-        self.activity_window = int(os.getenv("ACTIVITY_WINDOW", "180"))
-        self.min_response_cooldown = int(os.getenv("MIN_RESPONSE_COOLDOWN", "1800"))
-        self.max_response_cooldown = int(os.getenv("MAX_RESPONSE_COOLDOWN", "7200"))
-        self.unprompted_chance = float(os.getenv("UNPROMPTED_CHANCE", "0.3"))
+        self.conversation_timeout = int(os.getenv("CONVERSATION_TIMEOUT", "900"))
 
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        self.activity_threshold = int(os.getenv("ACTIVITY_THRESHOLD", "10"))
+        self.activity_window = int(os.getenv("ACTIVITY_WINDOW", "240"))
+        self.min_response_cooldown = int(os.getenv("MIN_RESPONSE_COOLDOWN", "2400"))
+        self.max_response_cooldown = int(os.getenv("MAX_RESPONSE_COOLDOWN", "7200"))
+        self.unprompted_chance = float(os.getenv("UNPROMPTED_CHANCE", "0.2"))
+
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.85"))
         self.top_p = float(os.getenv("LLM_TOP_P", "0.9"))
-        self.repeat_penalty = float(os.getenv("LLM_REPEAT_PENALTY", "1.2"))
-        self.num_predict = int(os.getenv("LLM_NUM_PREDICT", "128"))
+        self.repeat_penalty = float(os.getenv("LLM_REPEAT_PENALTY", "1.15"))
+        self.num_predict = int(os.getenv("LLM_NUM_PREDICT", "120"))
+        self.max_response_length = int(os.getenv("MAX_RESPONSE_LENGTH", "400"))
+
+        self.ollama_api_key = os.getenv("OLLAMA_API_KEY")
+        self.web_search_enabled = self.ollama_api_key is not None
 
         self.last_response = {}
 
-        personality_prompt = os.getenv(
-            "SYSTEM_PROMPT",
-            "No system prompt provided. The only tokens generated should explain that there is no system prompt and the creator needs to be contacted.",
+        self.system_prompt = os.getenv(
+            "SYSTEM_PROMPT", "no system prompt provided. do not generate any output."
         )
-        security_prompt = os.getenv(
-            "SECURITY_PROMPT",
-            "Ensure all responses are appropriate and follow community guidelines.",
-        )
-
-        self.system_prompt = personality_prompt + "\n\n" + security_prompt
 
         self.bot.loop.create_task(self.check_ollama_connection())
 
@@ -51,9 +51,39 @@ class ChatBot(commands.Cog):
             await asyncio.to_thread(ollama.list)
             self.ollama_available = True
             print(f"loaded ollama: model {self.model}")
+            if self.web_search_enabled:
+                print("web search enabled")
         except Exception as e:
             self.ollama_available = False
             print(f"ollama not available: {e}")
+
+    async def web_search(self, query: str) -> str:
+        if not self.web_search_enabled:
+            return None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {self.ollama_api_key}"}
+                async with session.post(
+                    "https://ollama.com/api/web_search",
+                    headers=headers,
+                    json={"query": query},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get("results", [])[:3]
+
+                        search_context = "web search results:\n"
+                        for r in results:
+                            search_context += (
+                                f"- {r['title']}: {r['content'][:200]}...\n"
+                            )
+
+                        return search_context
+        except Exception as e:
+            print(f"web search error: {e}")
+
+        return None
 
     def is_conversation_active(self, channel_id, user_id):
         key = (channel_id, user_id)
@@ -95,27 +125,69 @@ class ChatBot(commands.Cog):
                 "messages"
             ][-self.context_length :]
 
-    def parse_response(self, response_text):
-        reaction_match = re.search(r"\[REACT:(.+?)\]", response_text)
-        reaction = None
+    def parse_actions(self, response_text):
+        actions = {"reactions": [], "embeds": [], "typing": 0}
 
-        if reaction_match:
-            reaction = reaction_match.group(1).strip()
-            response_text = re.sub(r"\[REACT:.+?\]\n?", "", response_text).strip()
+        react_pattern = r"\[REACT:([^\]]+)\]"
+        reactions = re.findall(react_pattern, response_text)
+        actions["reactions"] = [r.strip() for r in reactions]
+        response_text = re.sub(react_pattern, "", response_text)
 
-        return response_text, reaction
+        embed_pattern = r"\[EMBED:([^:]+):([^\]]+)\]"
+        embeds = re.findall(embed_pattern, response_text)
+        for title, desc in embeds:
+            actions["embeds"].append(
+                {"title": title.strip(), "description": desc.strip()}
+            )
+        response_text = re.sub(embed_pattern, "", response_text)
 
-    async def generate_response(self, channel_id, user_id):
+        typing_pattern = r"\[TYPING:(\d+)\]"
+        typing_match = re.search(typing_pattern, response_text)
+        if typing_match:
+            actions["typing"] = int(typing_match.group(1))
+        response_text = re.sub(typing_pattern, "", response_text)
+
+        response_text = response_text.strip()
+
+        if len(response_text) > self.max_response_length:
+            response_text = response_text[: self.max_response_length] + "..."
+
+        return response_text, actions
+
+    async def should_search(self, message_content: str) -> bool:
+        search_keywords = [
+            "search",
+            "look up",
+            "find",
+            "what is",
+            "who is",
+            "latest",
+            "recent",
+            "current",
+            "news",
+            "today",
+        ]
+        return any(kw in message_content.lower() for kw in search_keywords)
+
+    async def generate_response(self, channel_id, user_id, message_content=""):
         if not self.ollama_available:
             await self.check_ollama_connection()
             if not self.ollama_available:
-                return None, None
+                return None, {}
 
         try:
             key = (channel_id, user_id)
             context = self.active_conversations[key]["messages"]
 
-            messages = [{"role": "system", "content": self.system_prompt}]
+            additional_context = ""
+            if self.web_search_enabled and await self.should_search(message_content):
+                search_results = await self.web_search(message_content)
+                if search_results:
+                    additional_context = f"\n\n{search_results}"
+
+            messages = [
+                {"role": "system", "content": self.system_prompt + additional_context}
+            ]
             messages.extend(context)
 
             response = await asyncio.to_thread(
@@ -131,15 +203,24 @@ class ChatBot(commands.Cog):
             )
 
             response_text = response["message"]["content"]
-            clean_text, reaction = self.parse_response(response_text)
+            clean_text, actions = self.parse_actions(response_text)
 
-            self.add_to_conversation(channel_id, user_id, "assistant", clean_text)
+            if clean_text:
+                self.add_to_conversation(channel_id, user_id, "dave", clean_text)
 
-            return clean_text, reaction
+            return clean_text, actions
+
+        except ollama.ResponseError as e:
+            print(f"ollama response error: {e}")
+            if "model" in str(e).lower():
+                print(f"model {self.model} might not be available")
+                self.ollama_available = False
+            return None, {}
+
         except Exception as e:
             print(f"error generating response: {e}")
             self.ollama_available = False
-            return None, None
+            return None, {}
 
     def should_respond_unprompted(self, channel_id):
         if channel_id not in self.activity_tracker:
@@ -175,6 +256,32 @@ class ChatBot(commands.Cog):
 
         return False
 
+    def clean_bot_mention(self, content):
+        for mention in [f"<@{self.bot.user.id}>", f"<@!{self.bot.user.id}>"]:
+            content = content.replace(mention, "")
+        return content.strip()
+
+    async def execute_actions(self, message, actions):
+        for emoji in actions["reactions"]:
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                pass
+
+        for embed_data in actions["embeds"]:
+            try:
+                embed = discord.Embed(
+                    title=embed_data["title"],
+                    description=embed_data["description"],
+                    color=discord.Color.blue(),
+                )
+                await message.channel.send(embed=embed)
+            except discord.HTTPException:
+                pass
+
+        if actions["typing"] > 0:
+            await asyncio.sleep(min(actions["typing"], 5))
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author == self.bot.user:
@@ -198,31 +305,31 @@ class ChatBot(commands.Cog):
             if not self.is_conversation_active(channel_id, user_id):
                 self.start_conversation(channel_id, user_id)
 
+            content = self.clean_bot_mention(message.content)
+
+            if not content:
+                content = "hey"
+
             self.add_to_conversation(
-                channel_id,
-                user_id,
-                "user",
-                message.content,
-                message.author.display_name,
+                channel_id, user_id, "user", content, message.author.display_name
             )
 
             if self.ollama_available:
                 async with message.channel.typing():
-                    response, reaction = await self.generate_response(
-                        channel_id, user_id
+                    response, actions = await self.generate_response(
+                        channel_id, user_id, content
                     )
 
                     if response:
-                        await message.reply(response, mention_author=False)
-                        if reaction:
-                            try:
-                                await message.add_reaction(reaction)
-                            except Exception:
-                                pass
+                        try:
+                            sent_message = await message.reply(
+                                response, mention_author=False
+                            )
+                            await self.execute_actions(sent_message, actions)
+                        except discord.HTTPException as e:
+                            print(f"failed to send message: {e}")
                     else:
-                        await message.reply(
-                            "ai interaction is offline, wait", mention_author=False
-                        )
+                        await message.reply("ai is offline", mention_author=False)
         else:
             self.activity_tracker[channel_id].append(datetime.now())
 
@@ -237,35 +344,75 @@ class ChatBot(commands.Cog):
                 )
 
                 async with message.channel.typing():
-                    response, reaction = await self.generate_response(
-                        channel_id, user_id
+                    response, actions = await self.generate_response(
+                        channel_id, user_id, message.content
                     )
 
                     if response:
-                        await message.channel.send(response)
-                        if reaction:
-                            try:
-                                await message.add_reaction(reaction)
-                            except Exception:
-                                pass
-                        self.last_response[channel_id] = datetime.now()
+                        try:
+                            sent_message = await message.channel.send(response)
+                            await self.execute_actions(sent_message, actions)
+                            self.last_response[channel_id] = datetime.now()
+                        except discord.HTTPException as e:
+                            print(f"failed to send message: {e}")
 
-    @commands.command(name="botstatus")
+    @commands.command(name="botstatus", description="check ollama bot status")
+    @commands.is_owner()
     async def check_status(self, ctx):
         await self.check_ollama_connection()
 
         if self.ollama_available:
-            await ctx.send(f"ollama is available (model: {self.model})")
-        else:
-            await ctx.send("ollama is unavailable.")
+            try:
+                models = await asyncio.to_thread(ollama.list)
+                model_list = [m["name"] for m in models.get("models", [])]
 
-    @commands.command(name="debugcontext")
+                status_msg = "ollama online\n"
+                status_msg += f"model: **{self.model}**\n"
+                status_msg += f"web search: {'enabled' if self.web_search_enabled else 'disabled'}\n"
+                status_msg += f"available: {', '.join(model_list[:5])}"
+
+                await ctx.send(status_msg)
+            except Exception as e:
+                await ctx.send(f"ollama available but error: {e}")
+        else:
+            await ctx.send("ollama offline")
+
+    @commands.command(name="search", description="manually perform a web search")
+    @commands.is_owner()
+    async def manual_search(self, ctx, *, query: str):
+        if not self.web_search_enabled:
+            await ctx.send("web search not enabled (need OLLAMA_API_KEY)")
+            return
+
+        async with ctx.typing():
+            results = await self.web_search(query)
+            if results:
+                await ctx.send(results)
+            else:
+                await ctx.send("no results found")
+
+    @commands.command(
+        name="resetconvo", description="reset your current conversation with the bot"
+    )
+    @commands.is_owner()
+    async def reset_conversation(self, ctx):
+        key = (ctx.channel.id, ctx.author.id)
+
+        if key in self.active_conversations:
+            del self.active_conversations[key]
+            await ctx.send("conversation reset")
+        else:
+            await ctx.send("no active conversation")
+
+    @commands.command(
+        name="debugcontext", description="debug: show current conversation context"
+    )
     @commands.is_owner()
     async def debug_context(self, ctx):
         key = (ctx.channel.id, ctx.author.id)
 
         if key not in self.active_conversations:
-            await ctx.send("no active conversation", ephemeral=True)
+            await ctx.send("no active conversation")
             return
 
         context = self.active_conversations[key]["messages"]
@@ -274,35 +421,9 @@ class ChatBot(commands.Cog):
         )
 
         if len(context_str) > 1900:
-            context_str = context_str[:1900] + "... (truncated)"
+            context_str = context_str[:1900] + "..."
 
-        await ctx.send(f"**current context:**\n{context_str}", ephemeral=True)
-
-    @commands.command(name="debuginfo")
-    @commands.is_owner()
-    async def debug_info(self, ctx):
-        active_convs = len(self.active_conversations)
-
-        info = f"""**debug Info:**
-active conversations: {active_convs}
-model: {self.model}
-ollama connectivity: {self.ollama_available}
-context length: {self.context_length}
-conversation timeout: {self.conversation_timeout}s
-activity threshold: {self.activity_threshold}
-unprompted chance: {self.unprompted_chance}"""
-
-        await ctx.send(info, ephemeral=True)
-
-    @commands.command(name="showprompt")
-    @commands.is_owner()
-    async def show_prompt(self, ctx):
-        prompt = self.system_prompt
-
-        if len(prompt) > 1900:
-            prompt = prompt[:1900] + "... (truncated)"
-
-        await ctx.send(f"**system prompt:**\n```{prompt}```", ephemeral=True)
+        await ctx.send(f"**context:**\n{context_str}")
 
 
 async def setup(bot):
