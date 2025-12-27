@@ -2,7 +2,6 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
 # C extensions
 *.so
 
@@ -208,3 +207,4 @@ __marimo__/
 
 # data specific to the bot
 data/
+ai/
